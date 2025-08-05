@@ -1,0 +1,242 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <!-- Header -->
+    <div class="text-center mb-8">
+        <h1 class="text-4xl font-bold text-gray-900 mb-4">Upload Your Files</h1>
+        <p class="text-xl text-gray-600 max-w-2xl mx-auto">
+            Upload your financial data files to generate comprehensive reports and analysis
+        </p>
+    </div>
+
+    <!-- Upload Form -->
+    <div class="bg-white rounded-3xl shadow-2xl p-8 md:p-12 border border-gray-100">
+        <div class="mb-8">
+            <div class="flex items-center space-x-4 mb-6">
+                <div class="w-12 h-12 bg-gradient-to-r from-blue-500 to-purple-600 rounded-xl flex items-center justify-center">
+                    <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+                    </svg>
+                </div>
+                <div>
+                    <h2 class="text-2xl font-bold text-gray-900">File Upload Center</h2>
+                    <p class="text-gray-600">Please upload all three required CSV files</p>
+                </div>
+            </div>
+        </div>
+
+        <form method="post" enctype="multipart/form-data" id="uploadForm" class="space-y-6">
+            <!-- File Input 1: Deals CSV -->
+            <div class="relative group">
+                <label for="deals_csv" class="block text-lg font-semibold text-gray-900 mb-3">
+                    1. Deals CSV File
+                    <span class="text-red-500">*</span>
+                </label>
+                <div class="relative">
+                    <input type="file" 
+                           class="hidden" 
+                           id="deals_csv" 
+                           name="deals_csv" 
+                           accept=".csv"
+                           required 
+                           onchange="updateFileName(this, 'deals-filename')">
+                    <label for="deals_csv" 
+                           class="flex items-center justify-center w-full h-32 border-2 border-dashed border-gray-300 rounded-2xl cursor-pointer hover:border-blue-500 hover:bg-blue-50 transition-all duration-300 group-hover:scale-[1.02] bg-gradient-to-br from-blue-50/50 to-purple-50/50">
+                        <div class="text-center">
+                            <svg class="mx-auto h-12 w-12 text-gray-400 group-hover:text-blue-500 transition-colors duration-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                            </svg>
+                            <p class="mt-2 text-gray-600 group-hover:text-blue-600 transition-colors duration-300">
+                                <span class="font-semibold">Click to upload</span> or drag and drop
+                            </p>
+                            <p class="text-sm text-gray-500">CSV files only</p>
+                        </div>
+                    </label>
+                </div>
+                <div id="deals-filename" class="mt-2 text-sm text-green-600 font-medium hidden"></div>
+            </div>
+
+            <!-- File Input 2: Excluded Accounts CSV -->
+            <div class="relative group">
+                <label for="ex_csv" class="block text-lg font-semibold text-gray-900 mb-3">
+                    2. Excluded Accounts CSV File
+                    <span class="text-red-500">*</span>
+                </label>
+                <div class="relative">
+                    <input type="file" 
+                           class="hidden" 
+                           id="ex_csv" 
+                           name="ex_csv" 
+                           accept=".csv"
+                           required 
+                           onchange="updateFileName(this, 'ex-filename')">
+                    <label for="ex_csv" 
+                           class="flex items-center justify-center w-full h-32 border-2 border-dashed border-gray-300 rounded-2xl cursor-pointer hover:border-green-500 hover:bg-green-50 transition-all duration-300 group-hover:scale-[1.02] bg-gradient-to-br from-green-50/50 to-blue-50/50">
+                        <div class="text-center">
+                            <svg class="mx-auto h-12 w-12 text-gray-400 group-hover:text-green-500 transition-colors duration-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                            </svg>
+                            <p class="mt-2 text-gray-600 group-hover:text-green-600 transition-colors duration-300">
+                                <span class="font-semibold">Click to upload</span> or drag and drop
+                            </p>
+                            <p class="text-sm text-gray-500">CSV files only</p>
+                        </div>
+                    </label>
+                </div>
+                <div id="ex-filename" class="mt-2 text-sm text-green-600 font-medium hidden"></div>
+            </div>
+
+            <!-- File Input 3: VIP Client List CSV -->
+            <div class="relative group">
+                <label for="vip_csv" class="block text-lg font-semibold text-gray-900 mb-3">
+                    3. VIP Client List CSV File
+                    <span class="text-red-500">*</span>
+                </label>
+                <div class="relative">
+                    <input type="file" 
+                           class="hidden" 
+                           id="vip_csv" 
+                           name="vip_csv" 
+                           accept=".csv"
+                           required 
+                           onchange="updateFileName(this, 'vip-filename')">
+                    <label for="vip_csv" 
+                           class="flex items-center justify-center w-full h-32 border-2 border-dashed border-gray-300 rounded-2xl cursor-pointer hover:border-purple-500 hover:bg-purple-50 transition-all duration-300 group-hover:scale-[1.02] bg-gradient-to-br from-purple-50/50 to-pink-50/50">
+                        <div class="text-center">
+                            <svg class="mx-auto h-12 w-12 text-gray-400 group-hover:text-purple-500 transition-colors duration-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                            </svg>
+                            <p class="mt-2 text-gray-600 group-hover:text-purple-600 transition-colors duration-300">
+                                <span class="font-semibold">Click to upload</span> or drag and drop
+                            </p>
+                            <p class="text-sm text-gray-500">CSV files only</p>
+                        </div>
+                    </label>
+                </div>
+                <div id="vip-filename" class="mt-2 text-sm text-green-600 font-medium hidden"></div>
+            </div>
+
+            <!-- Submit Button -->
+            <div class="pt-6">
+                <button type="submit" 
+                        id="submitBtn"
+                        class="w-full bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white px-8 py-4 rounded-2xl text-lg font-semibold transition-all duration-300 transform hover:scale-105 shadow-lg hover:shadow-2xl flex items-center justify-center space-x-3">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+                    </svg>
+                    <span>Upload Files</span>
+                </button>
+            </div>
+        </form>
+
+        <!-- Progress Bar -->
+        <div id="progressBar" class="hidden mt-6">
+            <div class="bg-gray-200 rounded-full h-3 overflow-hidden">
+                <div class="bg-gradient-to-r from-blue-500 to-purple-600 h-full rounded-full transition-all duration-500 ease-out" style="width: 0%" id="progressFill"></div>
+            </div>
+            <p class="text-center text-sm text-gray-600 mt-2">Uploading files...</p>
+        </div>
+    </div>
+
+    <!-- Help Section -->
+    <div class="mt-8 bg-gradient-to-r from-blue-50 to-purple-50 rounded-2xl p-6">
+        <h3 class="text-lg font-semibold text-gray-900 mb-4 flex items-center">
+            <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            File Requirements
+        </h3>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+            <div class="bg-white p-4 rounded-xl">
+                <h4 class="font-semibold text-blue-600 mb-2">Deals CSV</h4>
+                <p class="text-gray-600">Contains trading deal information with columns like Login, Processing rule, Notional volume, etc.</p>
+            </div>
+            <div class="bg-white p-4 rounded-xl">
+                <h4 class="font-semibold text-green-600 mb-2">Excluded Accounts</h4>
+                <p class="text-gray-600">List of account IDs to exclude from certain calculations (one per line).</p>
+            </div>
+            <div class="bg-white p-4 rounded-xl">
+                <h4 class="font-semibold text-purple-600 mb-2">VIP Clients</h4>
+                <p class="text-gray-600">List of VIP client account IDs for special volume calculations (one per line).</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+function updateFileName(input, targetId) {
+    const fileName = input.files[0]?.name;
+    const targetElement = document.getElementById(targetId);
+    
+    if (fileName) {
+        targetElement.innerHTML = `✓ Selected: ${fileName}`;
+        targetElement.classList.remove('hidden');
+        
+        // Add visual feedback to the label
+        const label = input.nextElementSibling;
+        label.classList.add('border-green-500', 'bg-green-50');
+        label.classList.remove('border-gray-300');
+    }
+}
+
+// Handle form submission with progress
+document.getElementById('uploadForm').addEventListener('submit', function(e) {
+    const submitBtn = document.getElementById('submitBtn');
+    const progressBar = document.getElementById('progressBar');
+    const progressFill = document.getElementById('progressFill');
+    
+    // Show loading state
+    submitBtn.innerHTML = `
+        <div class="loading-spinner mr-2"></div>
+        <span>Uploading...</span>
+    `;
+    submitBtn.disabled = true;
+    submitBtn.classList.add('opacity-75', 'cursor-not-allowed');
+    
+    // Show progress bar
+    progressBar.classList.remove('hidden');
+    
+    // Simulate progress (since we can't track real progress easily with form submission)
+    let progress = 0;
+    const interval = setInterval(() => {
+        progress += Math.random() * 15;
+        if (progress > 90) progress = 90;
+        progressFill.style.width = progress + '%';
+    }, 200);
+    
+    // Clear interval after 5 seconds (form should have submitted by then)
+    setTimeout(() => {
+        clearInterval(interval);
+        progressFill.style.width = '100%';
+    }, 5000);
+});
+
+// Drag and drop functionality
+document.querySelectorAll('label[for]').forEach(label => {
+    const input = document.getElementById(label.getAttribute('for'));
+    
+    label.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        label.classList.add('border-blue-500', 'bg-blue-50');
+    });
+    
+    label.addEventListener('dragleave', (e) => {
+        e.preventDefault();
+        label.classList.remove('border-blue-500', 'bg-blue-50');
+    });
+    
+    label.addEventListener('drop', (e) => {
+        e.preventDefault();
+        label.classList.remove('border-blue-500', 'bg-blue-50');
+        
+        const files = e.dataTransfer.files;
+        if (files.length > 0) {
+            input.files = files;
+            const event = new Event('change', { bubbles: true });
+            input.dispatchEvent(event);
+        }
+    });
+});
+</script>
+{% endblock %}

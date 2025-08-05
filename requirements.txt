@@ -1,0 +1,16 @@
+Flask
+Flask-SQLAlchemy
+Flask-Login
+Flask-Migrate
+Flask-WTF
+python-dotenv
+pandas
+openpyxl
+matplotlib
+plotly
+reportlab
+SQLAlchemy
+flake8
+pytest
+beautifulsoup4
+requests
