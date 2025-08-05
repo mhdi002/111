@@ -1,21 +1,18 @@
-"""
-Unified Processing Module - Combines original and new processing capabilities
-Supports both CSV and XLSX formats, implements all stage2 features
-"""
-
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from app import db
+from typing import Dict, List, Optional, Tuple, Union
+import re
+from sqlalchemy import and_, or_
+
+# Import models
 from app.models import (
     IBRebate, CRMWithdrawal, CRMDeposit, AccountList, WelcomeBonusAccount,
     M2pDeposit, SettlementDeposit, M2pWithdraw, SettlementWithdraw
 )
-import os
+from app import db
 
-# ═══════════════════════════════════════════════════════════════════
-# UTILITY FUNCTIONS
-# ═══════════════════════════════════════════════════════════════════
+# ─── Helpers ────────────────────────────────────────────────────────────────
 
 def round4(x):
     """Safely round a value to 4 decimal places."""
@@ -26,31 +23,18 @@ def round4(x):
 
 def parse_custom_datetime(s: str):
     """Parse datetime in multiple formats including dd.mm.yyyy hh:mm:ss"""
-    if pd.isna(s) or s == '':
+    if not s or pd.isna(s):
         return pd.NaT
     
     try:
-        # Try various formats
-        formats = [
-            "%d.%m.%Y %H:%M:%S",
-            "%Y-%m-%d %H:%M:%S", 
-            "%Y-%m-%d",
-            "%d.%m.%Y",
-            "%m/%d/%Y %H:%M:%S",
-            "%m/%d/%Y"
-        ]
-        
-        s_str = str(s).strip()
-        for fmt in formats:
-            try:
-                return pd.to_datetime(s_str, format=fmt, utc=True)
-            except ValueError:
-                continue
-        
-        # Fallback to pandas automatic parsing
-        return pd.to_datetime(s_str, utc=True)
-    except:
-        return pd.NaT
+        # Try dd.mm.yyyy hh:mm:ss format first
+        return pd.to_datetime(s, format="%d.%m.%Y %H:%M:%S", utc=True)
+    except (ValueError, TypeError):
+        try:
+            # Try standard ISO format
+            return pd.to_datetime(s, utc=True)
+        except (ValueError, TypeError):
+            return pd.NaT
 
 def sanitize_numeric_series(sr: pd.Series) -> pd.Series:
     """Clean a pandas Series to ensure it contains only numeric values."""
@@ -62,93 +46,715 @@ def sanitize_numeric_series(sr: pd.Series) -> pd.Series:
           .fillna(0.0)
     )
 
-def detect_separator(file_path):
-    """Detect the separator used in a CSV file"""
-    try:
-        with open(file_path, 'r', encoding='utf-8-sig') as f:
-            first_line = f.readline()
-            if first_line.count('\t') > first_line.count(','):
-                return '\t'
-            elif first_line.count(';') > first_line.count(','):
-                return ';'
-            else:
-                return ','
-    except:
-        return ','
-
-def read_file(file_path):
-    """Read CSV or XLSX file with automatic format detection"""
-    if not file_path or not os.path.exists(file_path):
-        return pd.DataFrame()
+def detect_separator(line: str) -> str:
+    """Detect CSV separator from a line."""
+    tab_count = line.count('\t')
+    comma_count = line.count(',')
+    semicolon_count = line.count(';')
     
-    try:
-        # Check file extension
-        _, ext = os.path.splitext(file_path.lower())
-        
-        if ext in ['.xlsx', '.xls']:
-            return pd.read_excel(file_path)
-        elif ext == '.csv':
-            # Try to detect separator
-            sep = detect_separator(file_path)
-            # Try UTF-8 with BOM first, then fallback
-            try:
-                return pd.read_csv(file_path, sep=sep, encoding='utf-8-sig')
-            except:
-                return pd.read_csv(file_path, sep=sep, encoding='latin-1')
-        else:
-            # Assume CSV for unknown extensions
-            sep = detect_separator(file_path)
-            return pd.read_csv(file_path, sep=sep, encoding='utf-8-sig')
-    except Exception as e:
-        print(f"Error reading file {file_path}: {e}")
-        return pd.DataFrame()
+    if tab_count >= comma_count and tab_count >= semicolon_count:
+        return '\t'
+    if semicolon_count >= comma_count:
+        return ';'
+    return ','
 
 def filter_by_date_range(df: pd.DataFrame, start_date, end_date, datetime_col="Date & Time (UTC)"):
-    """Filter a DataFrame by a given date range with flexible date parsing"""
+    """Filter a DataFrame by a given date range."""
     if df.empty or datetime_col not in df.columns:
         return df
 
     if start_date and end_date:
-        try:
-            start_dt = parse_custom_datetime(start_date) if isinstance(start_date, str) else start_date
-            end_dt = parse_custom_datetime(end_date) if isinstance(end_date, str) else end_date
+        mask = pd.Series([True] * len(df))
 
-            if pd.isna(start_dt) or pd.isna(end_dt):
-                raise ValueError("Invalid start or end date format")
+        start_dt = parse_custom_datetime(start_date) if isinstance(start_date, str) else start_date
+        end_dt = parse_custom_datetime(end_date) if isinstance(end_date, str) else end_date
 
-            # Parse datetime column with custom parser
-            parsed_dts = df[datetime_col].apply(lambda x: parse_custom_datetime(str(x)))
-            mask = (parsed_dts >= start_dt) & (parsed_dts <= end_dt)
+        if pd.isna(start_dt) or pd.isna(end_dt):
+             raise ValueError("Invalid start or end date format. Please use 'dd.mm.yyyy hh:mm:ss'")
 
-            return df[mask].copy()
-        except Exception as e:
-            print(f"Error in date filtering: {e}")
-            return df
+        # This is more efficient than iterating row-by-row
+        parsed_dts = df[datetime_col].apply(lambda x: parse_custom_datetime(str(x)))
+        mask = (parsed_dts >= start_dt) & (parsed_dts <= end_dt)
+
+        return df[mask].copy()
     return df
 
-def filter_unique_rows(existing_keys, new_rows, key_columns):
-    """Filter unique rows based on specified key columns"""
-    unique_rows = []
-    
-    for _, row in new_rows.iterrows():
-        # Create key based on specified columns
-        key_parts = []
-        for col_idx in key_columns:
-            if col_idx < len(row):
-                val = str(row.iloc[col_idx] if pd.notna(row.iloc[col_idx]) else '').strip().upper()
-                key_parts.append(val)
-        
-        key = '|'.join(key_parts)
-        
-        if key and key not in existing_keys:
-            existing_keys.add(key)
-            unique_rows.append(row)
-    
-    return pd.DataFrame(unique_rows)
+# ─── New Processing Functions for Individual Data Sources ─────────────────────
 
-# ═══════════════════════════════════════════════════════════════════
-# ORIGINAL PROCESSING FUNCTIONS (Stage 1)
-# ═══════════════════════════════════════════════════════════════════
+def process_ib_rebate_csv(file_path: str) -> int:
+    """Process IB Rebate CSV and save to database."""
+    try:
+        # Read CSV with BOM handling
+        with open(file_path, 'r', encoding='utf-8-sig') as f:
+            content = f.read().strip()
+        
+        df = pd.read_csv(file_path, encoding='utf-8-sig')
+        if df.empty:
+            return 0
+        
+        # Clean headers
+        df.columns = df.columns.str.strip()
+        headers_upper = [col.upper() for col in df.columns]
+        
+        # Find required columns
+        id_idx = next((i for i, h in enumerate(headers_upper) if 'TRANSACTION ID' in h), -1)
+        rebate_time_idx = next((i for i, h in enumerate(headers_upper) if 'REBATE TIME' in h), -1)
+        rebate_idx = next((i for i, h in enumerate(headers_upper) if h == 'REBATE'), -1)
+        
+        if id_idx == -1 or rebate_time_idx == -1:
+            raise ValueError("Required columns 'Transaction ID' and 'Rebate Time' not found")
+        
+        added_rows = 0
+        
+        for _, row in df.iterrows():
+            transaction_id = str(row.iloc[id_idx]).strip()
+            rebate_time_str = str(row.iloc[rebate_time_idx]).strip()
+            rebate_amount = float(row.iloc[rebate_idx]) if rebate_idx != -1 and pd.notna(row.iloc[rebate_idx]) else 0.0
+            
+            if not transaction_id or transaction_id.upper() == 'NAN':
+                continue
+                
+            # Check if already exists
+            existing = IBRebate.query.filter_by(transaction_id=transaction_id).first()
+            if existing:
+                continue
+            
+            # Parse rebate time
+            rebate_time = parse_custom_datetime(rebate_time_str)
+            if pd.isna(rebate_time):
+                continue
+            
+            # Create new record
+            rebate_record = IBRebate(
+                transaction_id=transaction_id,
+                rebate_time=rebate_time.to_pydatetime(),
+                rebate=rebate_amount
+            )
+            
+            db.session.add(rebate_record)
+            added_rows += 1
+        
+        db.session.commit()
+        return added_rows
+        
+    except Exception as e:
+        db.session.rollback()
+        raise e
+
+def process_crm_withdrawals_csv(file_path: str) -> int:
+    """Process CRM Withdrawals CSV and save to database."""
+    try:
+        # Read file and detect separator
+        with open(file_path, 'r', encoding='utf-8-sig') as f:
+            first_line = f.readline()
+            separator = detect_separator(first_line)
+        
+        df = pd.read_csv(file_path, sep=separator, encoding='utf-8-sig')
+        if df.empty:
+            return 0
+        
+        # Clean headers
+        df.columns = df.columns.str.replace('\ufeff', '').str.strip()
+        headers_upper = [col.upper() for col in df.columns]
+        
+        # Find required columns
+        def find_col_idx(possible_names):
+            return next((i for i, h in enumerate(headers_upper) if any(name.upper() in h for name in possible_names)), -1)
+        
+        review_time_idx = find_col_idx(['REVIEW TIME'])
+        trading_account_idx = find_col_idx(['TRADING ACCOUNT'])
+        amount_idx = find_col_idx(['WITHDRAWAL AMOUNT'])
+        request_id_idx = find_col_idx(['REQUEST ID'])
+        
+        if review_time_idx == -1 or trading_account_idx == -1 or amount_idx == -1 or request_id_idx == -1:
+            missing = []
+            if review_time_idx == -1: missing.append("Review Time")
+            if trading_account_idx == -1: missing.append("Trading Account")
+            if amount_idx == -1: missing.append("Withdrawal Amount")
+            if request_id_idx == -1: missing.append("Request ID")
+            raise ValueError(f"Required columns not found: {', '.join(missing)}")
+        
+        added_rows = 0
+        
+        for _, row in df.iterrows():
+            request_id = str(row.iloc[request_id_idx]).strip()
+            review_time_str = str(row.iloc[review_time_idx]).strip()
+            trading_account = str(row.iloc[trading_account_idx]).strip()
+            amount_str = str(row.iloc[amount_idx]).strip().upper()
+            
+            if not request_id or request_id.upper() == 'NAN':
+                continue
+            
+            # Check if already exists
+            existing = CRMWithdrawal.query.filter_by(request_id=request_id).first()
+            if existing:
+                continue
+            
+            # Parse review time
+            review_time = parse_custom_datetime(review_time_str)
+            if pd.isna(review_time):
+                continue
+            
+            # Convert withdrawal amount (handle USC -> USD)
+            if 'USD' in amount_str:
+                withdrawal_amount = float(re.sub(r'[^0-9.-]', '', amount_str))
+            elif 'USC' in amount_str:
+                raw_amount = float(re.sub(r'[^0-9.-]', '', amount_str))
+                withdrawal_amount = raw_amount / 100  # Convert USC to USD
+            else:
+                withdrawal_amount = float(re.sub(r'[^0-9.-]', '', amount_str))
+            
+            # Create new record
+            withdrawal_record = CRMWithdrawal(
+                request_id=request_id,
+                review_time=review_time.to_pydatetime(),
+                trading_account=trading_account,
+                withdrawal_amount=withdrawal_amount
+            )
+            
+            db.session.add(withdrawal_record)
+            added_rows += 1
+        
+        db.session.commit()
+        return added_rows
+        
+    except Exception as e:
+        db.session.rollback()
+        raise e
+
+def process_crm_deposit_csv(file_path: str) -> int:
+    """Process CRM Deposit CSV and save to database."""
+    try:
+        df = pd.read_csv(file_path, encoding='utf-8-sig')
+        if df.empty:
+            return 0
+        
+        # Clean headers
+        df.columns = df.columns.str.strip()
+        headers_upper = [col.upper() for col in df.columns]
+        
+        # Find required columns
+        request_time_idx = next((i for i, h in enumerate(headers_upper) if 'REQUEST TIME' in h), -1)
+        trading_account_idx = next((i for i, h in enumerate(headers_upper) if 'TRADING ACCOUNT' in h), -1)
+        trading_amount_idx = next((i for i, h in enumerate(headers_upper) if 'TRADING AMOUNT' in h), -1)
+        request_id_idx = next((i for i, h in enumerate(headers_upper) if 'REQUEST ID' in h), -1)
+        payment_method_idx = next((i for i, h in enumerate(headers_upper) if 'PAYMENT METHOD' in h), -1)
+        
+        if any(idx == -1 for idx in [request_time_idx, trading_account_idx, trading_amount_idx]):
+            raise ValueError("Required columns not found (Request Time, Trading Account, Trading Amount)")
+        
+        added_rows = 0
+        
+        for _, row in df.iterrows():
+            request_id = str(row.iloc[request_id_idx]).strip() if request_id_idx != -1 else None
+            request_time_str = str(row.iloc[request_time_idx]).strip()
+            trading_account = str(row.iloc[trading_account_idx]).strip()
+            trading_amount_str = str(row.iloc[trading_amount_idx]).strip()
+            payment_method = str(row.iloc[payment_method_idx]).strip() if payment_method_idx != -1 else None
+            
+            if not request_id or request_id.upper() == 'NAN':
+                continue
+            
+            # Check if already exists
+            existing = CRMDeposit.query.filter_by(request_id=request_id).first()
+            if existing:
+                continue
+            
+            # Parse request time
+            request_time = parse_custom_datetime(request_time_str)
+            if pd.isna(request_time):
+                continue
+            
+            # Parse trading amount (handle USC conversion)
+            parts = trading_amount_str.split()
+            if len(parts) >= 2:
+                unit = parts[0].upper()
+                amount_str = parts[1].replace(',', '').replace(/[^\d.-]/g, '')
+                amount = float(amount_str) if amount_str else 0
+                
+                if unit == 'USC':
+                    amount = amount / 100  # Convert USC to USD
+            else:
+                amount = float(re.sub(r'[^\d.-]', '', trading_amount_str))
+            
+            # Create new record
+            deposit_record = CRMDeposit(
+                request_id=request_id,
+                request_time=request_time.to_pydatetime(),
+                trading_account=trading_account,
+                trading_amount=amount,
+                payment_method=payment_method
+            )
+            
+            db.session.add(deposit_record)
+            added_rows += 1
+        
+        db.session.commit()
+        return added_rows
+        
+    except Exception as e:
+        db.session.rollback()
+        raise e
+
+def process_account_list_csv(file_path: str) -> Tuple[int, int]:
+    """Process Account List CSV and save to database. Returns (accounts_added, welcome_bonus_added)."""
+    try:
+        # Read file content and handle MetaTrader header
+        with open(file_path, 'r', encoding='utf-8-sig') as f:
+            lines = f.readlines()
+        
+        # Remove MetaTrader header if present
+        if lines and 'METATRADER' in lines[0].upper():
+            lines = lines[1:]
+        
+        content = ''.join(lines)
+        df = pd.read_csv(pd.StringIO(content), sep=';')
+        
+        if df.empty:
+            return 0, 0
+        
+        # Clean headers
+        df.columns = df.columns.str.strip().str.upper()
+        
+        # Find required columns
+        login_idx = next((i for i, col in enumerate(df.columns) if col == 'LOGIN'), -1)
+        name_idx = next((i for i, col in enumerate(df.columns) if col == 'NAME'), -1)
+        group_idx = next((i for i, col in enumerate(df.columns) if col == 'GROUP'), -1)
+        
+        if any(idx == -1 for idx in [login_idx, name_idx, group_idx]):
+            raise ValueError("Required columns (Login, Name, Group) not found")
+        
+        # Clear existing data
+        AccountList.query.delete()
+        WelcomeBonusAccount.query.delete()
+        
+        accounts_added = 0
+        welcome_added = 0
+        
+        for _, row in df.iterrows():
+            login = str(row.iloc[login_idx]).strip()
+            name = str(row.iloc[name_idx]).strip()
+            group = str(row.iloc[group_idx]).strip()
+            
+            if not login:
+                continue
+            
+            # Add to Account List
+            account_record = AccountList(
+                login=login,
+                name=name,
+                group=group
+            )
+            db.session.add(account_record)
+            accounts_added += 1
+            
+            # Add to Welcome Bonus if applicable
+            if group == "WELCOME\\Welcome BBOOK":
+                welcome_record = WelcomeBonusAccount(login=login)
+                db.session.add(welcome_record)
+                welcome_added += 1
+        
+        db.session.commit()
+        return accounts_added, welcome_added
+        
+    except Exception as e:
+        db.session.rollback()
+        raise e
+
+def process_payment_csv(file_path: str) -> int:
+    """Process Payment CSV and distribute data to appropriate tables."""
+    try:
+        # Read CSV with BOM handling
+        with open(file_path, 'r', encoding='utf-8-sig') as f:
+            content = f.read().replace('\ufeff', '').strip()
+        
+        df = pd.read_csv(pd.StringIO(content))
+        if df.empty:
+            return 0
+        
+        # Clean headers
+        df.columns = df.columns.str.strip()
+        
+        # Column mapping
+        column_map = {
+            'confirmed': 'Confirmed',
+            'txId': 'Transaction ID',
+            'transactionAddress': 'Wallet address',
+            'status': 'Status',
+            'type': 'Type',
+            'paymentGatewayName': 'Payment gateway',
+            'finalAmount': 'Transaction amount',
+            'finalCurrency': 'Transaction currency',
+            'transactionAmount': 'Settlement amount',
+            'transactionCurrencyDisplayName': 'Settlement currency',
+            'processingFee': 'Processing fee',
+            'price': 'Price',
+            'comment': 'Comment',
+            'paymentId': 'Payment ID',
+            'created': 'Booked',
+            'tradingAccount': 'Trading account',
+            'correctCoinSent': 'correctCoinSent',
+            'balanceAfterTransaction': 'Balance after',
+            'txId_2': 'Transaction ID',
+            'tierFee': 'Tier fee'
+        }
+        
+        # Map CSV headers to expected headers
+        csv_to_expected = {}
+        for expected_key, csv_header in column_map.items():
+            csv_idx = next((i for i, col in enumerate(df.columns) if col.strip() == csv_header), -1)
+            if csv_idx != -1:
+                csv_to_expected[expected_key] = csv_idx
+        
+        added_rows = 0
+        
+        for _, row in df.iterrows():
+            # Extract key fields
+            tx_id = str(row.iloc[csv_to_expected.get('txId', 0)]).strip() if 'txId' in csv_to_expected else ''
+            status = str(row.iloc[csv_to_expected.get('status', 0)]).upper() if 'status' in csv_to_expected else ''
+            pg_name = str(row.iloc[csv_to_expected.get('paymentGatewayName', 0)]).upper() if 'paymentGatewayName' in csv_to_expected else ''
+            type_val = str(row.iloc[csv_to_expected.get('type', 0)]).upper() if 'type' in csv_to_expected else ''
+            
+            if not tx_id or pg_name == 'BALANCE' or status != 'DONE':
+                continue
+            
+            # Parse common fields
+            created_str = str(row.iloc[csv_to_expected.get('created', 0)]) if 'created' in csv_to_expected else ''
+            created_time = parse_custom_datetime(created_str)
+            if pd.isna(created_time):
+                continue
+            
+            trading_account = str(row.iloc[csv_to_expected.get('tradingAccount', 0)]).strip() if 'tradingAccount' in csv_to_expected else ''
+            final_amount = float(row.iloc[csv_to_expected.get('finalAmount', 0)]) if 'finalAmount' in csv_to_expected and pd.notna(row.iloc[csv_to_expected.get('finalAmount', 0)]) else 0.0
+            tier_fee = float(row.iloc[csv_to_expected.get('tierFee', 0)]) if 'tierFee' in csv_to_expected and pd.notna(row.iloc[csv_to_expected.get('tierFee', 0)]) else 0.0
+            
+            # Determine target table and check for duplicates
+            if type_val == 'DEPOSIT':
+                if 'SETTLEMENT' in pg_name:
+                    # Settlement Deposit
+                    existing = SettlementDeposit.query.filter_by(tx_id=tx_id).first()
+                    if not existing:
+                        record = SettlementDeposit(
+                            tx_id=tx_id,
+                            created=created_time.to_pydatetime(),
+                            trading_account=trading_account,
+                            final_amount=final_amount,
+                            tier_fee=tier_fee
+                        )
+                        db.session.add(record)
+                        added_rows += 1
+                else:
+                    # M2p Deposit
+                    existing = M2pDeposit.query.filter_by(tx_id=tx_id).first()
+                    if not existing:
+                        record = M2pDeposit(
+                            tx_id=tx_id,
+                            created=created_time.to_pydatetime(),
+                            trading_account=trading_account,
+                            final_amount=final_amount,
+                            tier_fee=tier_fee
+                        )
+                        db.session.add(record)
+                        added_rows += 1
+            else:  # WITHDRAWAL
+                if 'SETTLEMENT' in pg_name:
+                    # Settlement Withdraw
+                    existing = SettlementWithdraw.query.filter_by(tx_id=tx_id).first()
+                    if not existing:
+                        record = SettlementWithdraw(
+                            tx_id=tx_id,
+                            created=created_time.to_pydatetime(),
+                            trading_account=trading_account,
+                            final_amount=final_amount,
+                            tier_fee=tier_fee
+                        )
+                        db.session.add(record)
+                        added_rows += 1
+                else:
+                    # M2p Withdraw
+                    existing = M2pWithdraw.query.filter_by(tx_id=tx_id).first()
+                    if not existing:
+                        record = M2pWithdraw(
+                            tx_id=tx_id,
+                            created=created_time.to_pydatetime(),
+                            trading_account=trading_account,
+                            final_amount=final_amount,
+                            tier_fee=tier_fee
+                        )
+                        db.session.add(record)
+                        added_rows += 1
+        
+        db.session.commit()
+        return added_rows
+        
+    except Exception as e:
+        db.session.rollback()
+        raise e
+
+# ─── Report Generation Functions ─────────────────────────────────────────────
+
+def generate_final_report(start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> pd.DataFrame:
+    """Generate the final report with all calculations."""
+    try:
+        # Helper function to sum filtered data
+        def sum_filtered_data(model_class, amount_field, date_field, start_dt=None, end_dt=None):
+            query = db.session.query(model_class)
+            if start_dt and end_dt:
+                query = query.filter(
+                    getattr(model_class, date_field) >= start_dt,
+                    getattr(model_class, date_field) <= end_dt
+                )
+            
+            total = 0
+            for record in query.all():
+                amount = getattr(record, amount_field, 0)
+                if amount:
+                    total += float(amount)
+            return total
+        
+        # Calculate individual components
+        values = []
+        
+        # Add date range if provided
+        if start_date and end_date:
+            date_range = f"Filtered from {start_date.strftime('%d.%m.%Y %H:%M:%S')} to {end_date.strftime('%d.%m.%Y %H:%M:%S')}"
+            values.append([date_range, ""])
+            values.append(["", ""])
+        
+        # Total Rebate
+        total_rebate = sum_filtered_data(IBRebate, 'rebate', 'rebate_time', start_date, end_date)
+        values.append(['Total Rebate', total_rebate])
+        
+        # M2p and Settlement Deposits/Withdrawals
+        m2p_deposit = sum_filtered_data(M2pDeposit, 'final_amount', 'created', start_date, end_date)
+        settlement_deposit = sum_filtered_data(SettlementDeposit, 'final_amount', 'created', start_date, end_date)
+        m2p_withdrawal = sum_filtered_data(M2pWithdraw, 'final_amount', 'created', start_date, end_date)
+        settlement_withdrawal = sum_filtered_data(SettlementWithdraw, 'final_amount', 'created', start_date, end_date)
+        
+        values.extend([
+            ['M2p Deposit', m2p_deposit],
+            ['Settlement Deposit', settlement_deposit],
+            ['M2p Withdrawal', m2p_withdrawal],
+            ['Settlement Withdrawal', settlement_withdrawal]
+        ])
+        
+        # CRM Deposit Total
+        crm_deposit_total = sum_filtered_data(CRMDeposit, 'trading_amount', 'request_time', start_date, end_date)
+        values.append(['CRM Deposit Total', crm_deposit_total])
+        
+        # Topchange Deposit Total (from CRM Deposit where payment_method = 'TOPCHANGE')
+        topchange_query = db.session.query(CRMDeposit).filter(CRMDeposit.payment_method == 'TOPCHANGE')
+        if start_date and end_date:
+            topchange_query = topchange_query.filter(
+                CRMDeposit.request_time >= start_date,
+                CRMDeposit.request_time <= end_date
+            )
+        
+        topchange_total = sum(float(record.trading_amount or 0) for record in topchange_query.all())
+        values.append(['Topchange Deposit Total', topchange_total])
+        
+        # Tier Fees
+        tier_fee_deposit = (
+            sum_filtered_data(M2pDeposit, 'tier_fee', 'created', start_date, end_date) +
+            sum_filtered_data(SettlementDeposit, 'tier_fee', 'created', start_date, end_date)
+        )
+        tier_fee_withdraw = (
+            sum_filtered_data(M2pWithdraw, 'tier_fee', 'created', start_date, end_date) +
+            sum_filtered_data(SettlementWithdraw, 'tier_fee', 'created', start_date, end_date)
+        )
+        
+        values.extend([
+            ['Tier Fee Deposit', tier_fee_deposit],
+            ['Tier Fee Withdraw', tier_fee_withdraw]
+        ])
+        
+        # Welcome Bonus Withdrawals
+        welcome_bonus_withdrawals = calculate_welcome_bonus_withdrawals(start_date, end_date)
+        values.append(['Welcome Bonus Withdrawals', welcome_bonus_withdrawals])
+        
+        # CRM Withdraw Total
+        crm_withdraw_total = sum_filtered_data(CRMWithdrawal, 'withdrawal_amount', 'review_time', start_date, end_date)
+        values.append(['CRM Withdraw Total', crm_withdraw_total])
+        
+        # Create DataFrame
+        df = pd.DataFrame(values, columns=['Metric', 'Value'])
+        return df
+        
+    except Exception as e:
+        raise e
+
+def calculate_welcome_bonus_withdrawals(start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> float:
+    """Calculate welcome bonus withdrawals by matching welcome bonus accounts with CRM withdrawals."""
+    try:
+        # Get welcome bonus account logins
+        welcome_accounts = {str(account.login).strip() for account in WelcomeBonusAccount.query.all()}
+        
+        if not welcome_accounts:
+            return 0.0
+        
+        # Query CRM withdrawals with date filtering
+        query = db.session.query(CRMWithdrawal)
+        if start_date and end_date:
+            query = query.filter(
+                CRMWithdrawal.review_time >= start_date,
+                CRMWithdrawal.review_time <= end_date
+            )
+        
+        total = 0.0
+        for withdrawal in query.all():
+            # Extract numeric login from trading account
+            trading_account = str(withdrawal.trading_account).strip()
+            login_match = re.search(r'\d+', trading_account)
+            if login_match:
+                login = login_match.group()
+                if login in welcome_accounts:
+                    total += float(withdrawal.withdrawal_amount or 0)
+        
+        return total
+        
+    except Exception as e:
+        return 0.0
+
+def compare_deposits(start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> pd.DataFrame:
+    """Compare CRM deposits with M2p deposits to find discrepancies."""
+    try:
+        # Get CRM deposits
+        crm_query = db.session.query(CRMDeposit)
+        if start_date and end_date:
+            crm_query = crm_query.filter(
+                CRMDeposit.request_time >= start_date,
+                CRMDeposit.request_time <= end_date
+            )
+        
+        # Get M2p deposits
+        m2p_query = db.session.query(M2pDeposit)
+        if start_date and end_date:
+            m2p_query = m2p_query.filter(
+                M2pDeposit.created >= start_date,
+                M2pDeposit.created <= end_date
+            )
+        
+        crm_deposits = crm_query.all()
+        m2p_deposits = m2p_query.all()
+        
+        # Convert to normalized format for comparison
+        crm_normalized = []
+        for crm in crm_deposits:
+            if crm.payment_method and crm.payment_method.upper() == 'TOPCHANGE':
+                continue  # Skip Topchange deposits
+            
+            crm_normalized.append({
+                'id': crm.id,
+                'source': 'CRM Deposit',
+                'date': crm.request_time,
+                'client_id': crm.trading_account.lower() if crm.trading_account else '',
+                'amount': float(crm.trading_amount or 0),
+                'account': crm.trading_account,
+                'name': getattr(crm, 'name', ''),  # If name field exists
+            })
+        
+        m2p_normalized = []
+        for m2p in m2p_deposits:
+            m2p_normalized.append({
+                'id': m2p.id,
+                'source': 'M2p Deposit',
+                'date': m2p.created,
+                'client_id': '',  # M2p doesn't have client_id directly
+                'amount': float(m2p.final_amount or 0),
+                'account': m2p.trading_account.lower() if m2p.trading_account else '',
+                'name': '',
+            })
+        
+        # Find unmatched records
+        matched_m2p = set()
+        unmatched = []
+        
+        # Match CRM deposits with M2p deposits
+        for crm_rec in crm_normalized:
+            match_found = False
+            for m2p_rec in m2p_normalized:
+                if m2p_rec['id'] in matched_m2p:
+                    continue
+                
+                # Check if dates are within 3.5 hours, account matches, and amounts are close
+                time_diff = abs((crm_rec['date'] - m2p_rec['date']).total_seconds())
+                if (time_diff <= 3.5 * 3600 and  # 3.5 hours
+                    crm_rec['client_id'] in m2p_rec['account'] and
+                    abs(crm_rec['amount'] - m2p_rec['amount']) <= 1):  # Amount tolerance
+                    matched_m2p.add(m2p_rec['id'])
+                    match_found = True
+                    break
+            
+            if not match_found:
+                unmatched.append([
+                    crm_rec['source'],
+                    crm_rec['date'].strftime('%Y-%m-%d %H:%M:%S'),
+                    crm_rec['client_id'],
+                    crm_rec['account'],
+                    crm_rec['amount'],
+                    crm_rec['name'],
+                    '',  # Confirmed column
+                    crm_rec['id']
+                ])
+        
+        # Add unmatched M2p deposits
+        for m2p_rec in m2p_normalized:
+            if m2p_rec['id'] not in matched_m2p:
+                # Try to find a match in CRM deposits
+                match_found = False
+                for crm_rec in crm_normalized:
+                    time_diff = abs((m2p_rec['date'] - crm_rec['date']).total_seconds())
+                    if (time_diff <= 3.5 * 3600 and
+                        crm_rec['client_id'] in m2p_rec['account'] and
+                        abs(crm_rec['amount'] - m2p_rec['amount']) <= 1):
+                        match_found = True
+                        break
+                
+                if not match_found:
+                    unmatched.append([
+                        m2p_rec['source'],
+                        m2p_rec['date'].strftime('%Y-%m-%d %H:%M:%S'),
+                        '',  # Client ID
+                        m2p_rec['account'],
+                        m2p_rec['amount'],
+                        '',  # Name
+                        '',  # Confirmed column
+                        m2p_rec['id']
+                    ])
+        
+        # Create DataFrame
+        columns = ['Source', 'Date', 'Client ID', 'Trading Account', 'Amount', 'Client Name', 'Confirmed (Y/N)', 'Row ID']
+        df = pd.DataFrame(unmatched, columns=columns)
+        return df
+        
+    except Exception as e:
+        raise e
+
+def remove_confirmed_discrepancies(discrepancy_ids: List[Tuple[str, int]]) -> int:
+    """Remove confirmed discrepancies from their respective tables."""
+    try:
+        removed_count = 0
+        
+        for source, row_id in discrepancy_ids:
+            if source == 'CRM Deposit':
+                record = CRMDeposit.query.get(row_id)
+                if record:
+                    db.session.delete(record)
+                    removed_count += 1
+            elif source == 'M2p Deposit':
+                record = M2pDeposit.query.get(row_id)
+                if record:
+                    db.session.delete(record)
+                    removed_count += 1
+        
+        db.session.commit()
+        return removed_count
+        
+    except Exception as e:
+        db.session.rollback()
+        raise e
+
+# ─── Original Deal Processing Functions (maintained for compatibility) ─────────
 
 def process_and_split(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     """Convert USC to USD and split the DataFrame by 'Processing rule' into A/B/Multi books."""
@@ -388,9 +994,9 @@ def generate_final_calculations(results: dict, chinese_df: pd.DataFrame, vip_vol
 
     return pd.DataFrame(calculations, columns=["Source", "Description", "Value"])
 
-def run_original_report_processing(deals_df: pd.DataFrame, excluded_df: pd.DataFrame, vip_df: pd.DataFrame, start_date: str = None, end_date: str = None):
+def run_report_processing(deals_df: pd.DataFrame, excluded_df: pd.DataFrame, vip_df: pd.DataFrame, start_date: str = None, end_date: str = None):
     """
-    Main orchestrator function to run the original report generation process.
+    Main orchestrator function to run the entire report generation process.
     """
     # 1. Load sets for excluded and vip clients
     excluded_logins = set(excluded_df.iloc[:, 0].astype(str).str.strip()) if not excluded_df.empty else set()
@@ -430,615 +1036,3 @@ def run_original_report_processing(deals_df: pd.DataFrame, excluded_df: pd.DataF
         "Final Calculations": final_calculations,
         "VIP Volume": vip_volume
     }
-
-# ═══════════════════════════════════════════════════════════════════
-# NEW PROCESSING FUNCTIONS (Stage 2) - Database Operations
-# ═══════════════════════════════════════════════════════════════════
-
-def process_ib_rebate_file(file_path):
-    """Process IB Rebate CSV/XLSX file and save to database"""
-    try:
-        df = read_file(file_path)
-        if df.empty:
-            return 0
-
-        # Normalize column names
-        df.columns = [col.strip().upper() for col in df.columns]
-
-        if 'TRANSACTION ID' not in df.columns or 'REBATE TIME' not in df.columns:
-            raise ValueError("Required columns 'Transaction ID' or 'Rebate Time' not found.")
-
-        # Get existing transaction IDs from the database
-        existing_ids = {item.transaction_id for item in IBRebate.query.all()}
-
-        new_rebates = []
-        for _, row in df.iterrows():
-            tx_id = str(row['TRANSACTION ID']).strip()
-            if tx_id and tx_id not in existing_ids:
-                rebate_time_str = str(row['REBATE TIME']).strip()
-                rebate_time = parse_custom_datetime(rebate_time_str)
-                
-                if pd.isna(rebate_time):
-                    print(f"Skipping row with invalid date: {rebate_time_str}")
-                    continue
-
-                # Get additional columns if they exist
-                rebate_amount = 0
-                if 'REBATE' in df.columns:
-                    try:
-                        rebate_amount = float(row['REBATE'])
-                    except:
-                        rebate_amount = 0
-
-                new_rebate = IBRebate(
-                    transaction_id=tx_id,
-                    rebate_time=rebate_time.to_pydatetime() if hasattr(rebate_time, 'to_pydatetime') else rebate_time
-                )
-                new_rebates.append(new_rebate)
-                existing_ids.add(tx_id)
-
-        if new_rebates:
-            db.session.bulk_save_objects(new_rebates)
-            db.session.commit()
-
-        return len(new_rebates)
-
-    except Exception as e:
-        db.session.rollback()
-        print(f"Error processing IB Rebate file: {e}")
-        return 0
-
-def process_crm_withdrawals_file(file_path):
-    """Process CRM Withdrawals CSV/XLSX file and save to database"""
-    try:
-        df = read_file(file_path)
-        if df.empty:
-            return 0
-
-        df.columns = [col.strip().upper().replace('"', '') for col in df.columns]
-
-        required_cols = ['REVIEW TIME', 'TRADING ACCOUNT', 'WITHDRAWAL AMOUNT', 'REQUEST ID']
-        if not all(col in df.columns for col in required_cols):
-            raise ValueError(f"Missing one of the required columns: {required_cols}")
-
-        existing_ids = {item.request_id for item in CRMWithdrawal.query.all()}
-
-        new_withdrawals = []
-        for _, row in df.iterrows():
-            req_id = str(row['REQUEST ID']).strip()
-            if req_id and req_id not in existing_ids:
-
-                # Handle different currency formats
-                amount_str = str(row['WITHDRAWAL AMOUNT']).upper()
-                if 'USC' in amount_str:
-                    # Extract number from USC format
-                    amount_raw = ''.join(filter(lambda x: x.isdigit() or x in '.-', amount_str))
-                    amount = float(amount_raw) / 100 if amount_raw else 0
-                elif 'USD' in amount_str:
-                    amount_raw = ''.join(filter(lambda x: x.isdigit() or x in '.-', amount_str))
-                    amount = float(amount_raw) if amount_raw else 0
-                else:
-                    amount_raw = ''.join(filter(lambda x: x.isdigit() or x in '.-', amount_str))
-                    amount = float(amount_raw) if amount_raw else 0
-
-                review_time = parse_custom_datetime(str(row['REVIEW TIME']))
-                if pd.isna(review_time):
-                    continue
-
-                new_withdrawal = CRMWithdrawal(
-                    request_id=req_id,
-                    review_time=review_time.to_pydatetime() if hasattr(review_time, 'to_pydatetime') else review_time,
-                    trading_account=str(row['TRADING ACCOUNT']).strip(),
-                    withdrawal_amount=amount
-                )
-                new_withdrawals.append(new_withdrawal)
-                existing_ids.add(req_id)
-
-        if new_withdrawals:
-            db.session.bulk_save_objects(new_withdrawals)
-            db.session.commit()
-
-        return len(new_withdrawals)
-
-    except Exception as e:
-        db.session.rollback()
-        print(f"Error processing CRM Withdrawals file: {e}")
-        return 0
-
-def process_crm_deposit_file(file_path):
-    """Process CRM Deposit CSV/XLSX file and save to database"""
-    try:
-        df = read_file(file_path)
-        if df.empty:
-            return 0
-
-        df.columns = [col.strip().upper() for col in df.columns]
-
-        required_cols = ['REQUEST TIME', 'TRADING ACCOUNT', 'TRADING AMOUNT', 'REQUEST ID']
-        if not all(col in df.columns for col in required_cols):
-            raise ValueError(f"Missing one of the required columns: {required_cols}")
-
-        existing_ids = {item.request_id for item in CRMDeposit.query.all()}
-
-        new_deposits = []
-        for _, row in df.iterrows():
-            req_id = str(row['REQUEST ID']).strip()
-            if req_id and req_id not in existing_ids:
-
-                # Handle different currency formats
-                amount_str = str(row['TRADING AMOUNT']).upper()
-                parts = amount_str.split()
-                
-                if 'USC' in amount_str:
-                    # Handle "USC 12345" format
-                    amount_raw = ''.join(filter(lambda x: x.isdigit() or x in '.-', parts[-1]))
-                    amount = float(amount_raw) / 100 if amount_raw else 0
-                elif 'USD' in amount_str:
-                    amount_raw = ''.join(filter(lambda x: x.isdigit() or x in '.-', parts[-1]))
-                    amount = float(amount_raw) if amount_raw else 0
-                else:
-                    amount_raw = ''.join(filter(lambda x: x.isdigit() or x in '.-', parts[-1]))
-                    amount = float(amount_raw) if amount_raw else 0
-
-                request_time = parse_custom_datetime(str(row['REQUEST TIME']))
-                if pd.isna(request_time):
-                    continue
-
-                # Get payment method if available
-                payment_method = ''
-                if 'PAYMENT METHOD' in df.columns:
-                    payment_method = str(row['PAYMENT METHOD']).strip()
-
-                new_deposit = CRMDeposit(
-                    request_id=req_id,
-                    request_time=request_time.to_pydatetime() if hasattr(request_time, 'to_pydatetime') else request_time,
-                    trading_account=str(row['TRADING ACCOUNT']).strip(),
-                    trading_amount=amount,
-                    payment_method=payment_method
-                )
-                new_deposits.append(new_deposit)
-                existing_ids.add(req_id)
-
-        if new_deposits:
-            db.session.bulk_save_objects(new_deposits)
-            db.session.commit()
-
-        return len(new_deposits)
-
-    except Exception as e:
-        db.session.rollback()
-        print(f"Error processing CRM Deposit file: {e}")
-        return 0
-
-def process_account_list_file(file_path):
-    """Process Account List CSV/XLSX file and save to database"""
-    try:
-        df = read_file(file_path)
-        if df.empty:
-            return 0, 0
-
-        # This function replaces all existing data
-        db.session.query(AccountList).delete()
-        db.session.query(WelcomeBonusAccount).delete()
-
-        df.columns = [col.strip().upper() for col in df.columns]
-
-        # Skip initial meta rows if they exist
-        if len(df) > 0 and "METATRADER" in str(df.iloc[0]).upper():
-            df = df.iloc[1:]
-
-        required_cols = ['LOGIN', 'NAME', 'GROUP']
-        if not all(col in df.columns for col in required_cols):
-            raise ValueError(f"Missing one of the required columns: {required_cols}")
-
-        new_accounts = []
-        new_welcome_accounts = []
-        for _, row in df.iterrows():
-            login = str(row['LOGIN']).strip()
-            if login:
-                new_accounts.append(AccountList(
-                    login=login,
-                    name=str(row['NAME']).strip(),
-                    group=str(row['GROUP']).strip()
-                ))
-                if "WELCOME\\WELCOME BBOOK" in str(row['GROUP']).upper():
-                    new_welcome_accounts.append(WelcomeBonusAccount(login=login))
-
-        if new_accounts:
-            db.session.bulk_save_objects(new_accounts)
-        if new_welcome_accounts:
-            db.session.bulk_save_objects(new_welcome_accounts)
-
-        db.session.commit()
-
-        return len(new_accounts), len(new_welcome_accounts)
-
-    except Exception as e:
-        db.session.rollback()
-        print(f"Error processing Account List file: {e}")
-        return 0, 0
-
-def process_payment_file(file_path):
-    """Process Payment CSV/XLSX file and save to database with enhanced logic from stage2"""
-    try:
-        df = read_file(file_path)
-        if df.empty:
-            return 0
-
-        # Clean column names and handle BOM
-        df.columns = [col.strip().replace('\ufeff', '').upper() for col in df.columns]
-
-        # Column mapping as in stage2 code
-        column_map = {
-            'CONFIRMED': 'Confirmed',
-            'TXID': 'Transaction ID', 
-            'TRANSACTIONADDRESS': 'Wallet address',
-            'STATUS': 'Status',
-            'TYPE': 'Type',
-            'PAYMENTGATEWAYNAME': 'Payment gateway',
-            'FINALAMOUNT': 'Transaction amount',
-            'FINALCURRENCY': 'Transaction currency',
-            'TRANSACTIONAMOUNT': 'Settlement amount',
-            'TRANSACTIONCURRENCYDISPLAYNAME': 'Settlement currency',
-            'PROCESSINGFEE': 'Processing fee',
-            'PRICE': 'Price',
-            'COMMENT': 'Comment',
-            'PAYMENTID': 'Payment ID',
-            'CREATED': 'Booked',
-            'TRADINGACCOUNT': 'Trading account',
-            'CORRECTCOINSENT': 'correctCoinSent',
-            'BALANCEAFTERTRANSACTION': 'Balance after',
-            'TXID_2': 'Transaction ID',
-            'TIERFEE': 'Tier fee'
-        }
-
-        # Get existing transaction IDs from all four tables
-        existing_ids = set()
-        for model in [M2pDeposit, SettlementDeposit, M2pWithdraw, SettlementWithdraw]:
-            existing_ids.update({item.tx_id for item in model.query.all()})
-
-        new_rows = {
-            "m2p_deposit": [], "settlement_deposit": [],
-            "m2p_withdraw": [], "settlement_withdraw": []
-        }
-
-        for _, row in df.iterrows():
-            # Check for transaction ID in multiple possible columns
-            tx_id = ''
-            for col in ['TXID', 'TRANSACTION ID']:
-                if col in df.columns and pd.notna(row.get(col)):
-                    tx_id = str(row[col]).strip()
-                    break
-
-            if tx_id and tx_id not in existing_ids:
-                # Enhanced status and payment gateway filtering
-                status = str(row.get('STATUS', '')).upper()
-                pg_name = str(row.get('PAYMENTGATEWAYNAME', '')).upper()
-                type_str = str(row.get('TYPE', '')).upper()
-
-                # Skip if not DONE status or BALANCE payment gateway
-                if status != 'DONE' or pg_name == 'BALANCE':
-                    continue
-
-                # Determine target model based on type and payment gateway
-                target_model = None
-                target_list = None
-                
-                if type_str == 'DEPOSIT':
-                    if 'SETTLEMENT' in pg_name:
-                        target_model = SettlementDeposit
-                        target_list = new_rows["settlement_deposit"]
-                    else:
-                        target_model = M2pDeposit
-                        target_list = new_rows["m2p_deposit"]
-                elif type_str == 'WITHDRAW':
-                    if 'SETTLEMENT' in pg_name:
-                        target_model = SettlementWithdraw
-                        target_list = new_rows["settlement_withdraw"]
-                    else:
-                        target_model = M2pWithdraw
-                        target_list = new_rows["m2p_withdraw"]
-
-                if target_model and target_list is not None:
-                    # Parse dates with custom parser
-                    created_dt = parse_custom_datetime(str(row.get('CREATED', '')))
-                    if pd.isna(created_dt):
-                        continue
-
-                    # Parse amounts
-                    final_amount = 0
-                    tier_fee = 0
-                    try:
-                        final_amount = float(row.get('FINALAMOUNT', 0))
-                    except:
-                        pass
-                    
-                    try:
-                        tier_fee = float(row.get('TIERFEE', 0)) if pd.notna(row.get('TIERFEE')) else 0
-                    except:
-                        tier_fee = 0
-
-                    new_record = target_model(
-                        tx_id=tx_id,
-                        created=created_dt.to_pydatetime() if hasattr(created_dt, 'to_pydatetime') else created_dt,
-                        trading_account=str(row.get('TRADINGACCOUNT', '')).strip(),
-                        final_amount=final_amount,
-                        tier_fee=tier_fee
-                    )
-                    target_list.append(new_record)
-                    existing_ids.add(tx_id)
-
-        total_added = 0
-        for model_list in new_rows.values():
-            if model_list:
-                db.session.bulk_save_objects(model_list)
-                total_added += len(model_list)
-
-        db.session.commit()
-
-        return total_added
-
-    except Exception as e:
-        db.session.rollback()
-        print(f"Error processing Payment file: {e}")
-        return 0
-
-# ═══════════════════════════════════════════════════════════════════
-# ADVANCED REPORTING FUNCTIONS (Stage 2 Features)
-# ═══════════════════════════════════════════════════════════════════
-
-def sum_column_data(model_class, column_name, start_date=None, end_date=None, date_column=None):
-    """Generic function to sum column data with optional date filtering"""
-    try:
-        query = db.session.query(db.func.sum(getattr(model_class, column_name)))
-        
-        if start_date and end_date and date_column:
-            date_attr = getattr(model_class, date_column)
-            query = query.filter(date_attr.between(start_date, end_date))
-        
-        result = query.scalar()
-        return float(result) if result else 0.0
-    except Exception as e:
-        print(f"Error in sum_column_data: {e}")
-        return 0.0
-
-def calculate_welcome_bonus_withdrawals(start_date=None, end_date=None):
-    """Calculate welcome bonus withdrawals with date filtering"""
-    try:
-        # Get welcome bonus account logins
-        welcome_accounts = {acc.login for acc in WelcomeBonusAccount.query.all()}
-        
-        if not welcome_accounts:
-            return 0.0
-
-        # Query CRM withdrawals for welcome accounts
-        query = db.session.query(db.func.sum(CRMWithdrawal.withdrawal_amount)).filter(
-            CRMWithdrawal.trading_account.in_(welcome_accounts)
-        )
-        
-        if start_date and end_date:
-            query = query.filter(CRMWithdrawal.review_time.between(start_date, end_date))
-        
-        result = query.scalar()
-        return float(result) if result else 0.0
-    except Exception as e:
-        print(f"Error calculating welcome bonus withdrawals: {e}")
-        return 0.0
-
-def calculate_topchange_total(start_date=None, end_date=None):
-    """Calculate TopChange deposit total with date filtering"""
-    try:
-        query = db.session.query(db.func.sum(CRMDeposit.trading_amount)).filter(
-            CRMDeposit.payment_method.ilike('%topchange%')
-        )
-        
-        if start_date and end_date:
-            query = query.filter(CRMDeposit.request_time.between(start_date, end_date))
-        
-        result = query.scalar()
-        return float(result) if result else 0.0
-    except Exception as e:
-        print(f"Error calculating TopChange total: {e}")
-        return 0.0
-
-def generate_advanced_final_report(start_date=None, end_date=None):
-    """
-    Generate comprehensive final report with all data sources and optional date filtering
-    Implements stage2 functionality
-    """
-    try:
-        # Convert string dates to datetime objects if needed
-        if isinstance(start_date, str):
-            start_date = datetime.strptime(start_date, '%Y-%m-%d')
-        if isinstance(end_date, str):
-            end_date = datetime.strptime(end_date, '%Y-%m-%d')
-
-        # Calculate all report values
-        values = []
-
-        # 1. Total Rebate (count of rebate records)
-        rebate_query = IBRebate.query
-        if start_date and end_date:
-            rebate_query = rebate_query.filter(IBRebate.rebate_time.between(start_date, end_date))
-        total_rebate = rebate_query.count()
-        values.append(["Total Rebate", total_rebate])
-
-        # 2. Payment Data - M2p Deposit
-        m2p_deposit = sum_column_data(M2pDeposit, 'final_amount', start_date, end_date, 'created')
-        values.append(["M2p Deposit", m2p_deposit])
-
-        # 3. Payment Data - Settlement Deposit  
-        settlement_deposit = sum_column_data(SettlementDeposit, 'final_amount', start_date, end_date, 'created')
-        values.append(["Settlement Deposit", settlement_deposit])
-
-        # 4. Payment Data - M2p Withdrawal
-        m2p_withdrawal = sum_column_data(M2pWithdraw, 'final_amount', start_date, end_date, 'created')
-        values.append(["M2p Withdrawal", m2p_withdrawal])
-
-        # 5. Payment Data - Settlement Withdrawal
-        settlement_withdrawal = sum_column_data(SettlementWithdraw, 'final_amount', start_date, end_date, 'created')
-        values.append(["Settlement Withdrawal", settlement_withdrawal])
-
-        # 6. CRM Deposit Total
-        crm_deposit_total = sum_column_data(CRMDeposit, 'trading_amount', start_date, end_date, 'request_time')
-        values.append(["CRM Deposit Total", crm_deposit_total])
-
-        # 7. Tier Fee Deposit (M2p + Settlement)
-        tier_fee_deposit1 = sum_column_data(M2pDeposit, 'tier_fee', start_date, end_date, 'created')
-        tier_fee_deposit2 = sum_column_data(SettlementDeposit, 'tier_fee', start_date, end_date, 'created')
-        tier_fee_deposit = tier_fee_deposit1 + tier_fee_deposit2
-        values.append(["Tier Fee Deposit", tier_fee_deposit])
-
-        # 8. Tier Fee Withdraw (M2p + Settlement)
-        tier_fee_withdraw1 = sum_column_data(M2pWithdraw, 'tier_fee', start_date, end_date, 'created')
-        tier_fee_withdraw2 = sum_column_data(SettlementWithdraw, 'tier_fee', start_date, end_date, 'created')
-        tier_fee_withdraw = tier_fee_withdraw1 + tier_fee_withdraw2
-        values.append(["Tier Fee Withdraw", tier_fee_withdraw])
-
-        # 9. Welcome Bonus Withdrawals
-        welcome_bonus_withdrawals = calculate_welcome_bonus_withdrawals(start_date, end_date)
-        values.append(["Welcome Bonus Withdrawals", welcome_bonus_withdrawals])
-
-        # 10. CRM TopChange Total
-        crm_topchange_total = calculate_topchange_total(start_date, end_date)
-        values.append(["CRM TopChange Total", crm_topchange_total])
-
-        # 11. CRM Withdraw Total
-        crm_withdraw_total = sum_column_data(CRMWithdrawal, 'withdrawal_amount', start_date, end_date, 'review_time')
-        values.append(["CRM Withdraw Total", crm_withdraw_total])
-
-        # Create DataFrame
-        report_df = pd.DataFrame(values, columns=["Metric", "Value"])
-        
-        # Add date range info if provided
-        if start_date and end_date:
-            date_range = f"From {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}"
-            report_df = pd.concat([
-                pd.DataFrame([["Date Range", date_range]], columns=["Metric", "Value"]),
-                pd.DataFrame([["", ""]], columns=["Metric", "Value"]),
-                report_df
-            ], ignore_index=True)
-
-        return report_df
-
-    except Exception as e:
-        print(f"Error generating advanced final report: {e}")
-        return pd.DataFrame([["Error", str(e)]], columns=["Metric", "Value"])
-
-def compare_crm_and_client_deposits(start_date=None, end_date=None):
-    """
-    Compare CRM and M2P deposits to find discrepancies
-    Implements the comparison logic from stage2
-    """
-    try:
-        # Get CRM deposits
-        crm_query = CRMDeposit.query
-        if start_date and end_date:
-            crm_query = crm_query.filter(CRMDeposit.request_time.between(start_date, end_date))
-        crm_deposits = crm_query.all()
-
-        # Get M2P deposits  
-        m2p_query = M2pDeposit.query
-        if start_date and end_date:
-            m2p_query = m2p_query.filter(M2pDeposit.created.between(start_date, end_date))
-        m2p_deposits = m2p_query.all()
-
-        unmatched = []
-        matched_m2p = set()
-
-        # Match CRM deposits with M2P deposits
-        for crm_row in crm_deposits:
-            match_found = False
-            for m2p_row in m2p_deposits:
-                if m2p_row in matched_m2p:
-                    continue
-                    
-                # Check time difference (within 3.5 hours)
-                time_diff = abs((crm_row.request_time - m2p_row.created).total_seconds())
-                
-                # Check if trading accounts match and amounts are close
-                if (time_diff <= 3.5 * 3600 and
-                    crm_row.trading_account in m2p_row.trading_account and
-                    abs(crm_row.trading_amount - m2p_row.final_amount) <= 1):
-                    
-                    match_found = True
-                    matched_m2p.add(m2p_row)
-                    break
-
-            # If no match found and not TopChange, add to unmatched
-            if not match_found and (not crm_row.payment_method or crm_row.payment_method.lower() != 'topchange'):
-                unmatched.append({
-                    "Source": "CRM Deposit",
-                    "Date": crm_row.request_time.strftime('%Y-%m-%d'),
-                    "Client ID": crm_row.trading_account,
-                    "Trading Account": "",
-                    "Amount": crm_row.trading_amount,
-                    "Client Name": "",
-                    "Confirmed": "",
-                    "Row Index": crm_row.id
-                })
-
-        # Add unmatched M2P deposits
-        for m2p_row in m2p_deposits:
-            if m2p_row not in matched_m2p:
-                unmatched.append({
-                    "Source": "M2p Deposit",
-                    "Date": m2p_row.created.strftime('%Y-%m-%d'),
-                    "Client ID": "",
-                    "Trading Account": m2p_row.trading_account,
-                    "Amount": m2p_row.final_amount,
-                    "Client Name": "",
-                    "Confirmed": "",
-                    "Row Index": m2p_row.id
-                })
-
-        return pd.DataFrame(unmatched)
-
-    except Exception as e:
-        print(f"Error in deposit comparison: {e}")
-        return pd.DataFrame()
-
-def get_date_range_from_data():
-    """Get the overall date range from all data sources"""
-    try:
-        all_dates = []
-        
-        # Collect dates from all tables
-        for rebate in IBRebate.query.all():
-            if rebate.rebate_time:
-                all_dates.append(rebate.rebate_time)
-                
-        for deposit in CRMDeposit.query.all():
-            if deposit.request_time:
-                all_dates.append(deposit.request_time)
-                
-        for withdrawal in CRMWithdrawal.query.all():
-            if withdrawal.review_time:
-                all_dates.append(withdrawal.review_time)
-                
-        for deposit in M2pDeposit.query.all():
-            if deposit.created:
-                all_dates.append(deposit.created)
-                
-        for deposit in SettlementDeposit.query.all():
-            if deposit.created:
-                all_dates.append(deposit.created)
-                
-        for withdrawal in M2pWithdraw.query.all():
-            if withdrawal.created:
-                all_dates.append(withdrawal.created)
-                
-        for withdrawal in SettlementWithdraw.query.all():
-            if withdrawal.created:
-                all_dates.append(withdrawal.created)
-
-        if all_dates:
-            min_date = min(all_dates)
-            max_date = max(all_dates)
-            return min_date, max_date
-        
-        return None, None
-        
-    except Exception as e:
-        print(f"Error getting date range: {e}")
-        return None, None
