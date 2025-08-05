@@ -1,7 +1,7 @@
 # Financial Report Web Application
 
 
-[![Python application](https://github.com/mhdi002/Adminpanel/actions/workflows/main.yml/badge.svg)](https://github.com/mhdi002/Adminpanel/actions/workflows/main.yml)
+[![Python application](https://github.com/mhdi002/111/actions/workflows/main.yml/badge.svg)](https://github.com/mhdi002/111/actions/workflows/main.yml)
 
 This is a comprehensive web application for processing, analyzing, and visualizing financial deal data, built with Flask and containerized with Docker.
 
